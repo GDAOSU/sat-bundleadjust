@@ -16,16 +16,17 @@ from scipy.sparse.csgraph import connected_components
 class RegistrationPipeline(BundleAdjustmentPipeline):
     """Adjust RPCs against reusable tie tracks and optional fixed ECEF controls."""
 
-    API_VERSION = 4
+    API_VERSION = 5
 
     def __init__(self, ba_data, correspondence, altitude, controls=None, sigma_px=1.0,
-                 max_iter=100, max_tie_error_px=3.0):
+                 max_iter=100, max_tie_error_px=3.0, initial_tie_points=None):
         self.correspondence = np.asarray(correspondence, dtype=np.float64)
         self.reference_altitude = altitude
         self.controls = controls
         self.sigma_px = sigma_px
         self.max_iter = max_iter
         self.max_tie_error_px = max_tie_error_px
+        self.initial_tie_points = initial_tie_points
         self.stage_iterations = {}
         self.outlier_statistics = {}
         super().__init__(
@@ -55,7 +56,12 @@ class RegistrationPipeline(BundleAdjustmentPipeline):
 
     def initialize_pts3d(self):
         # A weak baseline can support pixel residuals even when depth is underdetermined.
-        triangulated = init_pts3d(self.C, self.cameras, "rpc", self.pairs_to_triangulate).astype(np.float64)
+        if self.initial_tie_points is None:
+            triangulated = init_pts3d(self.C, self.cameras, "rpc", self.pairs_to_triangulate).astype(np.float64)
+        else:
+            triangulated = np.asarray(self.initial_tie_points, dtype=np.float64)
+            if triangulated.shape != (self.C.shape[1], 3):
+                raise ValueError("Initial points must correspond to the input tie tracks")
         valid = np.isfinite(triangulated).all(axis=1) & (np.linalg.norm(triangulated, axis=1) > 6e6)
         points = np.where(valid[:, None], triangulated, 0.0)
         counts = valid.astype(int)
@@ -72,6 +78,7 @@ class RegistrationPipeline(BundleAdjustmentPipeline):
             points[selected] += xyz[finite]
             counts[selected] += 1
         self.C = self.C[:, counts > 0]
+        self.track_source_indices = np.flatnonzero(counts > 0)
         self.pts3d = points[counts > 0] / counts[counts > 0, None]
         if not self.C.shape[1] or np.any(np.sum(np.isfinite(self.C[::2]), axis=1) < 5):
             raise ValueError("Triangulation left fewer than five usable observations for at least one camera")
@@ -80,6 +87,7 @@ class RegistrationPipeline(BundleAdjustmentPipeline):
             self.C = np.hstack((observations, self.C))
             self.pts3d = np.vstack((coords, self.pts3d))
             self.n_pts_fix = len(coords)
+            self.track_source_indices = np.concatenate((-1 - np.arange(len(coords)), self.track_source_indices))
         # BundleAdjustmentPipeline also permutes feature bookkeeping when it fixes a camera.
         self.C_v2 = np.full((len(self.images), self.C.shape[1]), np.nan)
         self.features = [None] * len(self.images)
@@ -133,6 +141,7 @@ class RegistrationPipeline(BundleAdjustmentPipeline):
         # original point initialization for diagnostics and datum handling.
         optimized_points, optimized_cameras = p.get_vars_ready_for_fun(self.ba_sol.copy())
         self.C = C[:, keep]
+        self.track_source_indices = self.track_source_indices[p.pts_prev_indices[keep]]
         self.C_v2 = self.C_v2[:, p.pts_prev_indices[keep]]
         self.pts3d = p.pts3d[keep]
         incidence = np.isfinite(self.C[::2]).astype(np.int32)

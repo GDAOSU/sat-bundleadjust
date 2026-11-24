@@ -22,6 +22,7 @@ def test_outlier_cleanup_preserves_fixed_controls_and_initial_residuals():
     pipeline.pairs_to_triangulate = [(0, 1), (0, 2), (1, 2)]
 
     pipeline.C = np.ones((6, 13))
+    pipeline.track_source_indices = np.concatenate(([-1], np.arange(12)))
     pipeline.C_v2 = np.full((3, 13), np.nan)
     # The fixed GCP has only one measured pixel. This is a valid constraint.
     pipeline.C[2:, 0] = np.nan
@@ -41,6 +42,7 @@ def test_outlier_cleanup_preserves_fixed_controls_and_initial_residuals():
     assert new.n_pts == 12
     assert new.n_cam == 3
     assert new.n_obs == p.n_obs - 4
+    np.testing.assert_array_equal(pipeline.track_source_indices, [-1, 0, *range(2, 12)])
     np.testing.assert_array_equal(new.C[:, 0], p.C[:, 0])
     np.testing.assert_array_equal(new.pts3d[0], p.pts3d[0])
     np.testing.assert_array_equal(new.pts2d_w[new.pts_ind == 0], [2.0])
