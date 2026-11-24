@@ -4,10 +4,6 @@ CXXFLAGS ?= -march=native -O3
 export CFLAGS
 export CXXFLAGS
 
-# these options are only used for the programs directly inside "./c/"
-IIOLIBS     = -lz -ltiff -lpng -ljpeg -lm
-
-
 # default rule builds only the programs necessary for the test
 default: sift libraries
 
@@ -38,8 +34,8 @@ c/%.o: c/%.cpp
 
 libraries: lib/disp_to_h.so
 
-lib/disp_to_h.so: c/disp_to_h.o c/rpc.o
-	$(CC) -shared $^ $(IIOLIBS) -o $@
+lib/disp_to_h.so: c/disp_to_h.o c/rpc.o Makefile
+	$(CC) -shared c/disp_to_h.o c/rpc.o -lm -o $@
 
 
 
