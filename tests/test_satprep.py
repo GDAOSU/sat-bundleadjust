@@ -58,3 +58,43 @@ def test_outlier_cleanup_preserves_fixed_controls_and_initial_residuals():
     rho = loss(np.full(new.n_obs * 2, 100.0))
     assert np.all(rho[0, :2] < 100)
     np.testing.assert_array_equal(rho[0, 2:], 100)
+
+
+def test_superpoint_rotation_extracts_aligned_descriptors_and_preserves_pixels(monkeypatch):
+    import lightglue
+    import torch
+    from bundle_adjust.feature_tracks import ft_lightglue
+
+    image = np.zeros((6, 9), dtype=np.uint8)
+    image[2, 7] = 255
+    observed_shapes = []
+
+    class Extractor:
+        def __init__(self, **kwargs):
+            pass
+
+        def eval(self):
+            return self
+
+        def to(self, device):
+            return self
+
+        def extract(self, tensor, resize=None):
+            observed_shapes.append(tuple(tensor.shape[-2:]))
+            row, col = torch.nonzero(tensor.squeeze() > 0.9)[0]
+            return {
+                "keypoints": torch.stack((col, row)).float().reshape(1, 1, 2),
+                "keypoint_scores": torch.ones((1, 1)),
+                "descriptors": torch.ones((1, 1, 256)),
+            }
+
+    monkeypatch.setattr(ft_lightglue.loader, "load_image", lambda *args, **kwargs: image)
+    monkeypatch.setattr(lightglue, "SuperPoint", Extractor)
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
+    for angle in (0, 90, 180, 270):
+        features, count = ft_lightglue.superpoint_detect(
+            "fixture.tif", tracks_config={"FT_kp_max": 1, "FT_save": False}, rotation_deg=angle
+        )
+        assert count == 1
+        np.testing.assert_allclose(features[0, :2], [7, 2], atol=1e-5)
+    assert observed_shapes == [(6, 9), (9, 6), (6, 9), (9, 6)]

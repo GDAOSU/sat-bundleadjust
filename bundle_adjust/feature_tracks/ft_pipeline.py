@@ -91,7 +91,12 @@ class FeatureTracksPipeline:
 
         # detect using s2p or opencv sift
         if self.config["FT_matcher"] == "lightglue_superpoint":
-            args = [image_paths, masks, offsets, self.config]
+            self.superpoint_rotations = None
+            if self.config.get("FT_superpoint_align_orientation", False):
+                self.superpoint_rotations = ft_lightglue.common_superpoint_orientations(self.images)
+                # Native-orientation descriptors cannot be reused in this mode.
+                self.config["FT_reset"] = True
+            args = [image_paths, masks, offsets, self.config, self.superpoint_rotations]
             ft_lightglue.detect_superpoint_features_image_sequence(*args)
         elif self.config["FT_sift_detection"] == "s2p":
             if self.config["FT_n_proc"] > 1:
@@ -183,7 +188,11 @@ class FeatureTracksPipeline:
 
         # compute the rotation angles needed to align image orientation in image pairs
         lightglue_matching = self.config["FT_matcher"] in ["lightglue", "lightglue_superpoint"]
-        if lightglue_matching or len(self.challenging_pairs) > 0:
+        rotations = getattr(self, "superpoint_rotations", None)
+        if rotations is not None:
+            R = [(rotations[i], rotations[j]) for i, j in self.pairs_to_match]
+            R_challenging = [(rotations[i], rotations[j]) for i, j in self.challenging_pairs]
+        elif lightglue_matching or len(self.challenging_pairs) > 0:
             from .ft_lightglue import compute_rotations_for_lightglue_alignment
             R = compute_rotations_for_lightglue_alignment(self.pairs_to_match, self.images, lightglue_matching=lightglue_matching)
             R_challenging = compute_rotations_for_lightglue_alignment(self.challenging_pairs, self.images, lightglue_matching=True)

@@ -10,12 +10,13 @@ from .ba_pipeline import BundleAdjustmentPipeline
 from .feature_tracks.ft_match import compute_pairs_to_match
 from .feature_tracks.ft_triangulate import init_pts3d
 from .feature_tracks.ft_utils import filter_C_using_pairs_to_triangulate
+from scipy.sparse.csgraph import connected_components
 
 
 class RegistrationPipeline(BundleAdjustmentPipeline):
     """Adjust RPCs against reusable tie tracks and optional fixed ECEF controls."""
 
-    API_VERSION = 2
+    API_VERSION = 3
 
     def __init__(self, ba_data, correspondence, altitude, controls=None, sigma_px=1.0,
                  max_iter=100, max_tie_error_px=3.0):
@@ -134,9 +135,10 @@ class RegistrationPipeline(BundleAdjustmentPipeline):
         self.C = C[:, keep]
         self.C_v2 = self.C_v2[:, p.pts_prev_indices[keep]]
         self.pts3d = p.pts3d[keep]
-        self.check_connectivity_graph(min_matches=5)
-        if not self.connectivity_graph_looks_good:
+        incidence = np.isfinite(self.C[::2]).astype(np.int32)
+        if connected_components((incidence @ incidence.T) >= 5, directed=False, return_labels=False) != 1:
             raise ValueError("Outlier removal disconnected the camera network. Add reliable matches or adjust the threshold.")
+        self.check_connectivity_graph(min_matches=4)
         self.define_ba_parameters(verbose=False)
         new = self.ba_params
         if new.n_cam != p.n_cam or new.n_pts_fix != fixed or new.n_obs != int(retained.sum()):

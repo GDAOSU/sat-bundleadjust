@@ -80,7 +80,14 @@ def lightglue_matching(features_i, features_j, ransac_thr=0.3, matcher=None, max
                             width_confidence=-1,
                             ).eval().to(DEVICE)
 
-    if R is not None:
+    features_i_ = features_i
+    if R is not None and len(R) == 2:
+        # SuperPoint descriptors were extracted in a common orientation.
+        # Use the same coordinate frame for LightGlue, retaining native
+        # coordinates for geometric filtering and exported tracks.
+        features_i_ = rotate_feature_keypoint_coordinates(features_i, *R[0])
+        features_j_ = rotate_feature_keypoint_coordinates(features_j, *R[1])
+    elif R is not None:
         # a rotation multiple of 90 degrees exists between both images
         # lightglue matching needs both images with the same orientation
         # happy idea: can we circumvent this by simply rotating the SIFT kp coordinates?
@@ -92,7 +99,7 @@ def lightglue_matching(features_i, features_j, ransac_thr=0.3, matcher=None, max
     else:
         features_j_ = features_j
 
-    feats0 = lightglue_feature_format(features_i, device=DEVICE, features_type=features_type)
+    feats0 = lightglue_feature_format(features_i_, device=DEVICE, features_type=features_type)
     feats1 = lightglue_feature_format(features_j_, device=DEVICE, features_type=features_type)
 
     # run matching
@@ -146,7 +153,7 @@ def lightglue_matching(features_i, features_j, ransac_thr=0.3, matcher=None, max
     return matches_ij, n_matches, n_matches_final
 
 
-def superpoint_detect(geotiff_path, mask_path=None, offset=None, tracks_config=None):
+def superpoint_detect(geotiff_path, mask_path=None, offset=None, tracks_config=None, rotation_deg=0):
     """
     Detect SuperPoint keypoints in a single input grayscale image using LightGlue's SuperPoint extractor.
 
@@ -171,6 +178,9 @@ def superpoint_detect(geotiff_path, mask_path=None, offset=None, tracks_config=N
 
     if not found_existing_file:
         im = loader.load_image(geotiff_path, offset=offset, equalize=True).astype(np.uint8)
+        height, width = im.shape[:2]
+        if rotation_deg:
+            im = np.rot90(im, k=rotation_deg // 90).copy()
         device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         extractor = SuperPoint(max_num_keypoints=max_kp).eval().to(device)
         tensor = numpy_image_to_torch(im).to(device)
@@ -178,6 +188,9 @@ def superpoint_detect(geotiff_path, mask_path=None, offset=None, tracks_config=N
             feats = extractor.extract(tensor, resize=resize)
 
         keypoints = feats["keypoints"][0].detach().cpu().numpy()
+        if rotation_deg:
+            affine, _ = affine_image_rotation(width, height, rotation_deg)
+            keypoints = (keypoints - affine[:, 2]) @ affine[:, :2]
         scores = feats["keypoint_scores"][0].detach().cpu().numpy()
         descriptors = feats["descriptors"][0].detach().cpu().numpy()
 
@@ -223,7 +236,7 @@ def superpoint_detect(geotiff_path, mask_path=None, offset=None, tracks_config=N
     return features_i_final, n_kp
 
 
-def detect_superpoint_features_image_sequence(geotiff_paths, mask_paths=None, offsets=None, tracks_config=None):
+def detect_superpoint_features_image_sequence(geotiff_paths, mask_paths=None, offsets=None, tracks_config=None, rotations=None):
     """
     Detect SuperPoint keypoints in each image of a collection of input grayscale images.
     """
@@ -233,7 +246,8 @@ def detect_superpoint_features_image_sequence(geotiff_paths, mask_paths=None, of
     for i in range(n_img):
         mask_i = None if mask_paths is None else mask_paths[i]
         offset_i = None if offsets is None else offsets[i]
-        features_i, n_kp = superpoint_detect(geotiff_paths[i], mask_i, offset_i, tracks_config)
+        rotation = 0 if rotations is None else rotations[i][2]
+        features_i, n_kp = superpoint_detect(geotiff_paths[i], mask_i, offset_i, tracks_config, rotation)
         features.append(features_i)
         flush_print("{} SuperPoint keypoints in image {}".format(n_kp, i))
     return features
@@ -389,6 +403,15 @@ def suggest_quarter_rotation_from_rpc_scales(rpc_ref, rpc_sec, frac=0.02):
         },
     )
 
+def common_superpoint_orientations(images):
+    """Use the first RPC's orientation as the reference for all descriptors."""
+    rotations = []
+    for image in images:
+        _, angle, _ = suggest_quarter_rotation_from_rpc_scales(images[0].rpc, image.rpc)
+        rotations.append((image.offset["height"], image.offset["width"], angle))
+    return rotations
+
+
 def compute_rotations_for_lightglue_alignment(input_pairs, images, lightglue_matching=True):
     """
     LightGlue matching requires images to have consistent orientation
@@ -400,7 +423,7 @@ def compute_rotations_for_lightglue_alignment(input_pairs, images, lightglue_mat
         R  = []
         for pair in input_pairs:
             i, j = pair[0], pair[1]
-            h, w = images[i].offset["height"], images[i].offset["width"]
+            h, w = images[j].offset["height"], images[j].offset["width"]
             _, phi_deg, _ = suggest_quarter_rotation_from_rpc_scales(images[i].rpc, images[j].rpc)
             R.append(np.array([h, w, phi_deg]))
     else:
