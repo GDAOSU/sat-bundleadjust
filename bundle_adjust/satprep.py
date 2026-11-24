@@ -5,28 +5,35 @@ from pathlib import Path
 
 import numpy as np
 
-from . import ba_core, ba_rpcfit, geo_utils, loader
+from . import ba_core, ba_outliers, ba_rpcfit, geo_utils, loader
 from .ba_pipeline import BundleAdjustmentPipeline
 from .feature_tracks.ft_match import compute_pairs_to_match
 from .feature_tracks.ft_triangulate import init_pts3d
+from .feature_tracks.ft_utils import filter_C_using_pairs_to_triangulate
 
 
 class RegistrationPipeline(BundleAdjustmentPipeline):
     """Adjust RPCs against reusable tie tracks and optional fixed ECEF controls."""
 
-    def __init__(self, ba_data, correspondence, altitude, controls=None, sigma_px=1.0, max_iter=100):
+    API_VERSION = 2
+
+    def __init__(self, ba_data, correspondence, altitude, controls=None, sigma_px=1.0,
+                 max_iter=100, max_tie_error_px=3.0):
         self.correspondence = np.asarray(correspondence, dtype=np.float64)
         self.reference_altitude = altitude
         self.controls = controls
         self.sigma_px = sigma_px
         self.max_iter = max_iter
+        self.max_tie_error_px = max_tie_error_px
+        self.stage_iterations = {}
+        self.outlier_statistics = {}
         super().__init__(
             ba_data,
             tracks_config={"FT_K": 0, "FT_save": True},
             extra_ba_config={
                 "cam_model": "rpc",
                 "save_figures": False,
-                "clean_outliers": False,
+                "clean_outliers": True,
                 "fix_ref_cam": controls is None,
                 "correction_params": ["R"],
             },
@@ -81,16 +88,100 @@ class RegistrationPipeline(BundleAdjustmentPipeline):
         if self.n_pts_fix:
             fixed_observations = self.ba_params.pts_ind < self.ba_params.n_pts_fix
             self.ba_params.pts2d_w[fixed_observations] = 1.0 / self.sigma_px
-
-    def run_ba_L2(self):
-        # Retain robust residuals throughout the solve, including manual observations.
-        settings = {"loss": "soft_l1", "f_scale": 1.0, "max_iter": self.max_iter}
         if self.n_adj:
             self.ba_params.rotation_prior_weight = 5e6
+
+    def run_ba_softL1(self):
+        self._optimize("soft_l1", "robust")
+
+    def clean_outlier_observations(self):
+        """Prune automatic observations, retaining every measured GCP."""
+        p = self.ba_params
+        fixed = p.n_pts_fix
+        automatic = p.pts_ind >= fixed
+        C = p.C.copy()
+        thresholds = {}
+        removed = 0
+        for cam in range(p.n_cam):
+            observed = automatic & (p.cam_ind == cam)
+            errors = self.ba_e[observed]
+            if not len(errors):
+                continue
+            # Use the upstream per-camera elbow rule, with an absolute cap.
+            # The cap also applies when the residual distribution has no clear elbow.
+            elbow, success = ba_outliers.get_elbow_value(errors) if len(errors) > 1 else (errors[0], False)
+            threshold = max(elbow, 1.0) if success else errors.max()
+            threshold = min(threshold, self.max_tie_error_px)
+            bad = observed & (self.ba_e > threshold)
+            C[2 * cam:2 * cam + 2, p.pts_ind[bad]] = np.nan
+            removed += int(bad.sum())
+            image = self.images[p.cam_prev_indices[cam]]
+            thresholds[Path(image.geotiff_path).stem] = float(threshold)
+
+        # Apply the native track cleanup only to triangulated tie points.
+        # A manually measured ground point can have a single observation.
+        ties = C[:, fixed:]
+        keep = np.concatenate((np.arange(fixed), fixed + filter_C_using_pairs_to_triangulate(
+            ties, p.pairs_to_triangulate
+        )))
+        retained = np.isin(p.pts_ind, keep) & np.isfinite(C[2 * p.cam_ind, p.pts_ind])
+        if len(keep) <= fixed:
+            raise ValueError("Outlier removal left no triangulatable tie tracks")
+
+        # Warm-start the second pass from the robust solution. Keep the
+        # original point initialization for diagnostics and datum handling.
+        optimized_points, optimized_cameras = p.get_vars_ready_for_fun(self.ba_sol.copy())
+        self.C = C[:, keep]
+        self.C_v2 = self.C_v2[:, p.pts_prev_indices[keep]]
+        self.pts3d = p.pts3d[keep]
+        self.check_connectivity_graph(min_matches=5)
+        if not self.connectivity_graph_looks_good:
+            raise ValueError("Outlier removal disconnected the camera network. Add reliable matches or adjust the threshold.")
+        self.define_ba_parameters(verbose=False)
+        new = self.ba_params
+        if new.n_cam != p.n_cam or new.n_pts_fix != fixed or new.n_obs != int(retained.sum()):
+            raise ValueError("Outlier removal changed the camera or ground-control constraints")
+        new.params_opt = np.hstack((optimized_cameras[:, :new.n_params].ravel(), optimized_points[keep].ravel()))
+        self.initial_inlier_errors = self.init_e[retained]
+        self.outlier_statistics = {
+            "max_tie_error_px": float(self.max_tie_error_px),
+            "tie_tracks_before": int(p.n_pts - fixed),
+            "tie_tracks_after": int(new.n_pts - fixed),
+            "tie_observations_before": int(automatic.sum()),
+            "tie_observations_after": int((new.pts_ind >= fixed).sum()),
+            "removed_by_error": removed,
+            "gcp_observations": int((new.pts_ind < fixed).sum()),
+            "thresholds_px": thresholds,
+        }
+        loader.flush_print("Reprojection error thresholds per image: {}".format(thresholds))
+        loader.flush_print("Deleted {} tie observations and {} tie tracks. Preserved {} GCP observations.".format(
+            self.outlier_statistics["tie_observations_before"] - self.outlier_statistics["tie_observations_after"],
+            p.n_pts - new.n_pts, self.outlier_statistics["gcp_observations"]
+        ))
+
+    def run_ba_L2(self):
+        # Refine the cleaned tie network with L2. Manual controls retain their
+        # pixel sigma and robust loss, and their ECEF locations stay fixed.
+        gcp_residuals = np.flatnonzero(np.repeat(self.ba_params.pts_ind < self.ba_params.n_pts_fix, 2))
+
+        def control_loss(z):
+            rho = np.vstack((z, np.ones_like(z), np.zeros_like(z)))
+            t = 1 + z[gcp_residuals]
+            rho[0, gcp_residuals] = 2 * (np.sqrt(t) - 1)
+            rho[1, gcp_residuals] = t ** -0.5
+            rho[2, gcp_residuals] = -0.5 * t ** -1.5
+            return rho
+
+        self._optimize(control_loss if len(gcp_residuals) else "linear", "refine")
+        self.init_e = self.initial_inlier_errors
+
+    def _optimize(self, loss, stage):
+        settings = {"loss": loss, "f_scale": 1.0, "max_iter": self.max_iter}
         _, self.ba_sol, self.init_e, self.ba_e, iters = ba_core.run_ba_optimization(
             self.ba_params, settings, True, False
         )
         self.ba_iters += iters
+        self.stage_iterations[stage] = iters
 
     def save_corrected_rpcs(self):
         super().save_corrected_rpcs()

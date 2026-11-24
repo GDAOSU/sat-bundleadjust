@@ -290,8 +290,9 @@ def run_ba_optimization(p, ls_params=None, verbose=False, plots=True):
         def residual_function(v, params):
             rotations = rotation_prior_weight * v[rotation_indices]
             # Express a Gaussian prior inside the solver's soft-L1 objective.
-            prior = rotations * np.sqrt(1 + rotations**2 / 4)
-            return np.concatenate((fun(v, params), prior))
+            if ls_params["loss"] == "soft_l1":
+                rotations = rotations * np.sqrt(1 + rotations**2 / 4)
+            return np.concatenate((fun(v, params), rotations))
 
     if verbose:
         flush_print("Shape of Jacobian sparsity: {}x{}".format(*A.shape))
