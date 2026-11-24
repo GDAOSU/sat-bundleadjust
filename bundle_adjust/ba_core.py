@@ -276,13 +276,30 @@ def run_ba_optimization(p, ls_params=None, verbose=False, plots=True):
     vars_init = p.params_opt.copy()
     residuals_init = fun(vars_init, p)
     A = build_jacobian_sparsity(p)
+    residual_function = fun
+    rotation_prior_weight = getattr(p, "rotation_prior_weight", 0.0)
+    if rotation_prior_weight:
+        from scipy.sparse import csr_matrix, vstack
+
+        rotation_indices = np.arange(p.n_cam * 3).reshape(-1, 3)[p.n_cam_fix:].ravel()
+        A = vstack((A, csr_matrix(
+            (np.ones(rotation_indices.size), (np.arange(rotation_indices.size), rotation_indices)),
+            shape=(rotation_indices.size, A.shape[1]),
+        )))
+
+        def residual_function(v, params):
+            rotations = rotation_prior_weight * v[rotation_indices]
+            # Express a Gaussian prior inside the solver's soft-L1 objective.
+            prior = rotations * np.sqrt(1 + rotations**2 / 4)
+            return np.concatenate((fun(v, params), prior))
+
     if verbose:
         flush_print("Shape of Jacobian sparsity: {}x{}".format(*A.shape))
 
     # run bundle adjustment
     t0 = time.time()
     res = least_squares(
-        fun,
+        residual_function,
         vars_init,
         jac_sparsity=A,
         verbose=ls_params["verbose"],
@@ -300,7 +317,8 @@ def run_ba_optimization(p, ls_params=None, verbose=False, plots=True):
 
     # check error and plot residuals before and after the optimization
     iterations = res.nfev
-    residuals_ba, vars_ba = res.fun, res.x
+    vars_ba = res.x
+    residuals_ba = fun(vars_ba, p) if rotation_prior_weight else res.fun
     err_init = compute_reprojection_error(residuals_init, p.pts2d_w)
     err_ba = compute_reprojection_error(residuals_ba, p.pts2d_w)
     err_init_per_cam, err_ba_per_cam = [], []
