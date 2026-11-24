@@ -89,6 +89,9 @@ class FeatureTracksPipeline:
         # do we want to find keypoints all over each image or only within the region of the aoi?
         masks = self.mask_paths if self.config["FT_kp_aoi"] else None
 
+        # Dense pair matching does not need an independent keypoint detector.
+        if self.config["FT_matcher"] == "flexglue":
+            return
         # detect using s2p or opencv sift
         if self.config["FT_matcher"] == "lightglue_superpoint":
             self.superpoint_rotations = None
@@ -171,7 +174,7 @@ class FeatureTracksPipeline:
 
         if len(self.challenging_pairs) > 0:
             flush_print(f"\nFound {len(self.challenging_pairs)} challenging pairs and {len(self.pairs_to_match)} normal pairs.")
-            challenging_matcher = self.config["FT_matcher"] if self.config["FT_matcher"] == "lightglue_superpoint" else "lightglue"
+            challenging_matcher = self.config["FT_matcher"] if self.config["FT_matcher"] in ("lightglue_superpoint", "flexglue") else "lightglue"
             flush_print(f"Challening pairs will use {challenging_matcher} matcher, the rest will use {self.config['FT_matcher']}.\n")
             print(f"Challenging pairs    : {len(self.challenging_pairs)}")
         print(f"Total pairs to match : {len(self.pairs_to_match) + len(self.challenging_pairs)}")
@@ -182,6 +185,21 @@ class FeatureTracksPipeline:
         """
         Compute pairwise matching between all pairs to match not matched yet
         """
+        if self.config["FT_matcher"] == "flexglue":
+            from .ft_flexglue import match_satellite_pairs, index_pair_matches
+
+            self.pairs_to_match = list(dict.fromkeys(self.pairs_to_match + self.challenging_pairs))
+            self.coordinate_pairs = list(match_satellite_pairs(
+                self.images, self.pairs_to_match, self.config, self.mask_paths
+            ))
+            self.pairwise_matches = index_pair_matches(self.coordinate_pairs, self.features, self.output_dir)
+            for feature_path, utm_path, image in zip(self.features, self.features_utm, self.images):
+                features = np.load(feature_path, mmap_mode="r")
+                utm = ft_match.keypoints_to_utm_coords(features, image.rpc, image.offset, image.alt)
+                os.makedirs(os.path.dirname(utm_path), exist_ok=True)
+                np.save(utm_path, utm)
+            return
+
         # compute the affine fundamental matrices needed for epipolar based matching
         F = ft_match.compute_affine_fundamental_matrices(self.pairs_to_match, self.images, self.config)
         F_challenging = ft_match.compute_affine_fundamental_matrices(self.challenging_pairs, self.images, self.config)
@@ -248,6 +266,7 @@ class FeatureTracksPipeline:
             "C_v2": C_v2,
             "features": self.features,
             "pairwise_matches": self.pairwise_matches,
+            "coordinate_pairs": getattr(self, "coordinate_pairs", None),
             "pairs_to_triangulate": self.pairs_to_triangulate,
             "pairs_to_match": self.pairs_to_match,
             "n_pts_fix": n_pts_fix,

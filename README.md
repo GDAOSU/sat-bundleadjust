@@ -108,3 +108,26 @@ The evaluation repository supports comparisons between RPC camera models output 
 - [AMES Stereo Pipeline](https://github.com/NeoGeographyToolkit/StereoPipeline)
 - [SAT-BA v1](https://centreborelli.github.io/sat-bundleadjust/v1/)
 - [SAT-BA v2](https://centreborelli.github.io/sat-bundleadjust/v2/)
+
+## GDAOSU registration extensions
+
+This fork provides fixed ECEF ground control through
+`bundle_adjust.satprep.RegistrationPipeline`. The robust initial adjustment
+removes automatic tie-point outliers, preserves manual control measurements,
+and refines the retained ties with a quadratic loss.
+
+The feature-track pipeline also accepts `FT_matcher="flexglue"`. This backend
+uses detector-free FlexGlue matching and its integrated RoMa v2 refiner.
+Install the optional dependency with `pip install -e '.[flexglue]'`.
+The first run downloads the official model checkpoints to the PyTorch cache.
+
+- `FT_flexglue_orientation` selects native pixels (default) or RPC-derived
+  quarter-turn alignment (rpc).
+- `FT_flexglue_resolution` sets the descriptor and refiner resolution, a
+  multiple of 32. The default is 512.
+- `FT_kp_max` controls the number of sampled correspondences.
+- `FT_matches_max` caps the retained matches per pair after geometric filtering.
+
+The pipeline exposes its native feature indexes and the original subpixel
+coordinate pairs in `coordinate_pairs`. FlexGlue corner coordinates are
+converted to zero-based pixel centers before geometric filtering.

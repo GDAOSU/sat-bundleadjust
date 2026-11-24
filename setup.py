@@ -6,6 +6,7 @@ from codecs import open
 
 from setuptools import setup
 from setuptools.command import develop, build_py
+from setuptools.command.editable_wheel import editable_wheel
 
 _version_re = re.compile(r"__version__\s+=\s+(.*)")
 package_name = "bundle_adjust"
@@ -29,6 +30,13 @@ class CustomDevelop(develop.develop, object):
     def run(self):
         subprocess.check_call("make", shell=True)
         super(CustomDevelop, self).run()
+
+
+class CustomEditableWheel(editable_wheel):
+    """Build the native libraries when installing an editable checkout."""
+    def run(self):
+        subprocess.check_call(["make"])
+        super().run()
 
 
 class CustomBuildPy(build_py.build_py, object):
@@ -55,7 +63,10 @@ except ImportError:
     BdistWheel = None
 
 
-extras_require = {"test": ["pytest"]}
+extras_require = {
+    "test": ["pytest"],
+    "flexglue": ["flexglue @ git+https://github.com/cvg/flexglue.git@99920296d082c9405ebfd612d674efe288e74881"],
+}
 
 setup(
     name=package_name,
@@ -69,6 +80,7 @@ setup(
     extras_require=extras_require,
     cmdclass={'develop': CustomDevelop,
         'build_py': CustomBuildPy,
+              'editable_wheel': CustomEditableWheel,
         'bdist_wheel': BdistWheel},
     python_requires=">=3.6",
     entry_points="""

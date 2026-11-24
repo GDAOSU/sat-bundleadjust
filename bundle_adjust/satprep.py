@@ -16,7 +16,7 @@ from scipy.sparse.csgraph import connected_components
 class RegistrationPipeline(BundleAdjustmentPipeline):
     """Adjust RPCs against reusable tie tracks and optional fixed ECEF controls."""
 
-    API_VERSION = 3
+    API_VERSION = 4
 
     def __init__(self, ba_data, correspondence, altitude, controls=None, sigma_px=1.0,
                  max_iter=100, max_tie_error_px=3.0):

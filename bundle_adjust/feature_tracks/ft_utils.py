@@ -268,7 +268,7 @@ def init_feature_tracks_config(config=None):
           KEY                  TYPE       DESCRIPTION
         - FT_sift_detection    string   - "opencv" or "s2p"
         - FT_matcher           string   - "bruteforce", "flann", "epipolar_based", "local_window",
-                                          "lightglue" or "lightglue_superpoint"
+                                          "lightglue", "lightglue_superpoint" or "flexglue"
         - FT_rel_thr           float    - distance ratio threshold for matching
         - FT_abs_thr           float    - absolute distance threshold for matching
         - FT_ransac            float    - ransac threshold for matching
